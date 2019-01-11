@@ -6,11 +6,15 @@ import reactor.core.publisher.FluxSink;
 import reactor.core.publisher.Mono;
 
 import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 public class LeadershipManager {
     private final String topic;
     private final Node candidate;
     private final Map<String, NodeWrapper> leaders;
+    private final ScheduledExecutorService scheduledExecutorService;
 
     private final Flux<Node> leaderStream;
     private final FluxSink<Node> leaderSink;
@@ -21,13 +25,23 @@ public class LeadershipManager {
     private NodeWrapper leaderWrapper;
 
     public LeadershipManager(String topic, Node candidate, Map<String, NodeWrapper> leaders) {
-        this(topic, candidate, leaders, Status.FOLLOWER);
+        this(topic, candidate, leaders, Status.CANDIDATE, Executors.newSingleThreadScheduledExecutor());
     }
 
     public LeadershipManager(String topic, Node candidate, Map<String, NodeWrapper> leaders, Status status) {
+        this(topic, candidate, leaders, status, Executors.newSingleThreadScheduledExecutor());
+    }
+
+    public LeadershipManager(String topic, Node candidate, Map<String, NodeWrapper> leaders, ScheduledExecutorService scheduledExecutorService) {
+        this(topic, candidate, leaders, Status.CANDIDATE, scheduledExecutorService);
+    }
+
+    public LeadershipManager(String topic, Node candidate, Map<String, NodeWrapper> leaders, Status status, ScheduledExecutorService scheduledExecutorService) {
         this.topic = topic;
         this.candidate = candidate;
         this.leaders = leaders;
+        this.scheduledExecutorService = scheduledExecutorService;
+
         this.status = status;
         this.leaderWrapper = null;
 
@@ -59,58 +73,82 @@ public class LeadershipManager {
     public Mono<Result> acquireLeadership() {
         return Mono.just(this.candidate.getId()).map(id -> {
             if (this.leaderWrapper == null || !this.leaderWrapper.getNode().getId().equals(this.candidate.getId())) {
-                NodeWrapper candidateWrapper = new NodeWrapper(this.candidate, 1);
+                NodeWrapper candidateWrapper = new NodeWrapper(this.candidate, new NodeMetadata(1));
+
                 boolean status = this.leaders.replace(this.topic, this.leaderWrapper, candidateWrapper);
-                return this.handleReplaceResult(status, candidateWrapper);
+
+                if (status) {
+                    this.setLeaderWrapper(candidateWrapper);
+                    return Result.SUCCESS;
+                } else {
+                    this.setLeaderWrapper(this.leaders.get(this.topic));
+                    return Result.FAILED;
+                }
             } else {
                 return Result.SUCCESS;
             }
         });
     }
 
-    public Mono<Result> retainLeadership() {
-        return Mono.just(this.candidate.getId()).map(id -> {
-            if (this.leaderWrapper.getNode().getId().equals(this.candidate.getId())) {
-                NodeWrapper candidateWrapper = new NodeWrapper(this.candidate, this.leaderWrapper.getVersion() + 1);
-                boolean status = this.leaders.replace(this.topic, this.leaderWrapper, candidateWrapper);
-                return this.handleReplaceResult(status, candidateWrapper);
-            } else {
-                return Result.FAILED;
-            }
-        });
-    }
-
-    public void start() {
+    public void start(int heartbeatInterval, int leaderCheckInterval) {
         this.listenForStatusChanges().subscribe(status -> this.status = status);
 
-        NodeWrapper candidateWrapper = new NodeWrapper(this.candidate, 1);
-        NodeWrapper leaderWrapper = this.leaders.putIfAbsent(this.topic, candidateWrapper);
-        this.leaderWrapper = leaderWrapper;
-        this.putIntoFluxSink(leaderWrapper);
+        NodeWrapper leaderWrapper = this.leaders.putIfAbsent(this.topic, new NodeWrapper(this.candidate, new NodeMetadata(1)));
+
+        this.setLeaderWrapper(leaderWrapper);
+
+        scheduledExecutorService.scheduleAtFixedRate(() -> {
+            if (this.status == Status.LEADER) {
+                this.sendHeartBeat();
+            }
+        }, heartbeatInterval, heartbeatInterval, TimeUnit.SECONDS);
+
+        scheduledExecutorService.scheduleAtFixedRate(() -> {
+            if (this.status == Status.FOLLOWER) {
+                this.checkLeader();
+            }
+        }, leaderCheckInterval, leaderCheckInterval, TimeUnit.SECONDS);
     }
 
-    private Result handleReplaceResult(boolean status, NodeWrapper candidateWrapper) {
+    private void checkLeader() {
+        NodeWrapper leaderWrapper = this.leaders.get(this.topic);
+
+        this.setLeaderWrapper(leaderWrapper);
+    }
+
+    private void sendHeartBeat() {
+        NodeWrapper candidateWrapper = this.leaderWrapper.clone();
+        candidateWrapper.getNodeMetadata().setVersion(candidateWrapper.getNodeMetadata().getVersion() + 1);
+
+        boolean status = this.leaders.replace(this.topic, this.leaderWrapper, candidateWrapper);
+
         if (status) {
-            this.leaderWrapper = candidateWrapper;
-            this.putIntoFluxSink(candidateWrapper);
-            return Result.SUCCESS;
+            this.setLeaderWrapper(candidateWrapper);
         } else {
             NodeWrapper leaderWrapper = this.leaders.get(this.topic);
-            this.putIntoFluxSink(leaderWrapper);
-            return Result.FAILED;
+            this.setLeaderWrapper(leaderWrapper);
         }
     }
 
-    private void putIntoFluxSink(NodeWrapper leaderWrapper) {
+    private void setLeaderWrapper(NodeWrapper leaderWrapper) {
         if (leaderWrapper != null) {
-            if (this.leaderWrapper == null || !this.leaderWrapper.getNode().getId().equals(leaderWrapper.getNode().getId())) {
+            NodeWrapper oldLeaderWrapper = this.leaderWrapper;
+            this.leaderWrapper = leaderWrapper;
+
+            if (oldLeaderWrapper == null || !oldLeaderWrapper.getNode().equals(leaderWrapper.getNode())) {
                 this.leaderSink.next(leaderWrapper.getNode());
             }
 
-            if (this.status == Status.FOLLOWER && leaderWrapper.getNode().getId().equals(this.candidate.getId())) {
+            if ((this.status == Status.FOLLOWER || this.status == Status.CANDIDATE) &&
+                    leaderWrapper.getNode().equals(this.candidate)) {
                 this.statusSink.next(Status.LEADER);
-            } else if (this.status == Status.LEADER && !leaderWrapper.getNode().getId().equals(this.candidate.getId())) {
-                this.statusSink.next(Status.LEADER);
+            } else if ((this.status == Status.LEADER || this.status == Status.CANDIDATE) &&
+                    !leaderWrapper.getNode().equals(this.candidate)) {
+                this.statusSink.next(Status.FOLLOWER);
+            } else if (oldLeaderWrapper != null &&
+                    this.status == Status.FOLLOWER &&
+                    leaderWrapper.getNodeMetadata().getVersion() <= oldLeaderWrapper.getNodeMetadata().getVersion()) {
+                this.statusSink.next(Status.CANDIDATE);
             }
         }
     }

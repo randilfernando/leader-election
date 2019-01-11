@@ -24,4 +24,9 @@ public class Node {
         Node n = (Node) o;
         return (n.id.equals(this.id));
     }
+
+    @Override
+    protected Node clone() {
+        return new Node(this.id);
+    }
 }
