@@ -1,22 +1,26 @@
 package com.alternate.leaderelection.dynamodb;
 
-import com.alternate.leaderelection.common.MapAdapter;
 import com.amazonaws.services.dynamodbv2.document.DynamoDB;
 import com.amazonaws.services.dynamodbv2.document.Expected;
 import com.amazonaws.services.dynamodbv2.document.Item;
 import com.amazonaws.services.dynamodbv2.document.Table;
 import com.amazonaws.services.dynamodbv2.document.spec.DeleteItemSpec;
-import com.amazonaws.services.dynamodbv2.document.spec.GetItemSpec;
 import com.amazonaws.services.dynamodbv2.document.spec.PutItemSpec;
 import com.amazonaws.services.dynamodbv2.model.ConditionalCheckFailedException;
 import com.fasterxml.jackson.core.JsonProcessingException;
 
 import java.io.IOException;
+import java.util.Collection;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.BiConsumer;
+import java.util.function.BiFunction;
+import java.util.function.Function;
 
 import static com.alternate.leaderelection.dynamodb.Config.KEY_COLUMN_NAME;
 import static com.alternate.leaderelection.dynamodb.Config.VALUE_COLUMN_NAME;
 
-public class DynamoDBMap<K, V> extends MapAdapter<K, V> {
+public class DynamoDBMap<K, V> implements Map<K, V> {
 
     private Class<?> k;
     private Class<?> v;
@@ -35,11 +39,34 @@ public class DynamoDBMap<K, V> extends MapAdapter<K, V> {
     }
 
     @Override
-    public V get(Object key) {
-        GetItemSpec getItemSpec = new GetItemSpec()
-                .withPrimaryKey(KEY_COLUMN_NAME, String.valueOf(key));
+    public int size() {
+        // ToDo: Need to implement
+        throw new UnsupportedOperationException();
+    }
 
-        Item item = this.table.getItem(getItemSpec);
+    @Override
+    public boolean isEmpty() {
+        // ToDo: Need to implement
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public boolean containsKey(Object key) {
+        String keyAsString = String.valueOf(key);
+        Item item = this.table.getItem(KEY_COLUMN_NAME, keyAsString);
+        return item != null;
+    }
+
+    @Override
+    public boolean containsValue(Object value) {
+        // ToDo: Need to implement
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public V get(Object key) {
+        String keyAsString = String.valueOf(key);
+        Item item = this.table.getItem(KEY_COLUMN_NAME, keyAsString);
 
         if (item == null || !item.hasAttribute(VALUE_COLUMN_NAME)) return null;
 
@@ -55,15 +82,13 @@ public class DynamoDBMap<K, V> extends MapAdapter<K, V> {
     @Override
     public V put(K key, V value) {
         try {
+            String keyAsString = String.valueOf(key);
             String valueAsString = SerDeHelper.getValueAsString(value);
             Item item = new Item()
-                    .withPrimaryKey(KEY_COLUMN_NAME, String.valueOf(key))
+                    .withPrimaryKey(KEY_COLUMN_NAME, keyAsString)
                     .withString(VALUE_COLUMN_NAME, valueAsString);
 
-            PutItemSpec putItemSpec = new PutItemSpec()
-                    .withItem(item);
-
-            this.table.putItem(putItemSpec);
+            this.table.putItem(item);
             return value;
         } catch (JsonProcessingException e) {
             System.out.println("Serialization failed");
@@ -75,20 +100,48 @@ public class DynamoDBMap<K, V> extends MapAdapter<K, V> {
     public V remove(Object key) {
         V v = this.get(key);
 
-        DeleteItemSpec deleteItemSpec = new DeleteItemSpec()
-                .withPrimaryKey(KEY_COLUMN_NAME, String.valueOf(key));
-
-        this.table.deleteItem(deleteItemSpec);
+        String keyAsString = String.valueOf(key);
+        this.table.deleteItem(KEY_COLUMN_NAME, keyAsString);
         return v;
+    }
+
+    @Override
+    public void putAll(Map<? extends K, ? extends V> m) {
+        m.forEach(this::put);
+    }
+
+    @Override
+    public void clear() {
+        // ToDo: Need to implement
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public Set<K> keySet() {
+        // ToDo: Need to implement
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public Collection<V> values() {
+        // ToDo: Need to implement
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public Set<Entry<K, V>> entrySet() {
+        // ToDo: Need to implement
+        throw new UnsupportedOperationException();
     }
 
     @Override
     public V putIfAbsent(K key, V value) {
         try {
+            String keyAsString = String.valueOf(key);
             String valueAsString = SerDeHelper.getValueAsString(value);
 
             Item item = new Item()
-                    .withPrimaryKey(KEY_COLUMN_NAME, String.valueOf(key))
+                    .withPrimaryKey(KEY_COLUMN_NAME, keyAsString)
                     .withString(VALUE_COLUMN_NAME, valueAsString);
 
             PutItemSpec putItemSpec = new PutItemSpec()
@@ -129,5 +182,75 @@ public class DynamoDBMap<K, V> extends MapAdapter<K, V> {
             System.out.println("Conditional check failed: Value already updated");
             return false;
         }
+    }
+
+    @Override
+    public V getOrDefault(Object key, V defaultValue) {
+        V v = this.get(key);
+        return (v != null) ? v : defaultValue;
+    }
+
+    @Override
+    public void forEach(BiConsumer<? super K, ? super V> action) {
+        // ToDo: Need to implement
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void replaceAll(BiFunction<? super K, ? super V, ? extends V> function) {
+        // ToDo: Need to implement
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public boolean remove(Object key, Object value) {
+        String keyAsString = String.valueOf(key);
+
+        try {
+            String valueAsString = SerDeHelper.getValueAsString(value);
+
+            DeleteItemSpec deleteItemSpec = new DeleteItemSpec()
+                    .withPrimaryKey(KEY_COLUMN_NAME, keyAsString)
+                    .withExpected(new Expected(VALUE_COLUMN_NAME).eq(valueAsString));
+
+            this.table.deleteItem(deleteItemSpec);
+            return true;
+        } catch (JsonProcessingException e) {
+            System.out.println("Serialization failed");
+            return false;
+        } catch (ConditionalCheckFailedException e) {
+            System.out.println("Conditional check failed: Value not present");
+            return false;
+        }
+    }
+
+    @Override
+    public V replace(K key, V value) {
+        V v = this.get(key);
+        return (v != null) ? this.put(key, value) : v;
+    }
+
+    @Override
+    public V computeIfAbsent(K key, Function<? super K, ? extends V> mappingFunction) {
+        // ToDo: Need to implement
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public V computeIfPresent(K key, BiFunction<? super K, ? super V, ? extends V> remappingFunction) {
+        // ToDo: Need to implement
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public V compute(K key, BiFunction<? super K, ? super V, ? extends V> remappingFunction) {
+        // ToDo: Need to implement
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public V merge(K key, V value, BiFunction<? super V, ? super V, ? extends V> remappingFunction) {
+        // ToDo: Need to implement
+        throw new UnsupportedOperationException();
     }
 }
