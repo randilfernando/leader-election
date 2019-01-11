@@ -146,7 +146,7 @@ public class DynamoDBMap<K, V> implements Map<K, V> {
 
             PutItemSpec putItemSpec = new PutItemSpec()
                     .withItem(item)
-                    .withConditionExpression("attribute_not_exists(" + KEY_COLUMN_NAME + ")");
+                    .withExpected(new Expected(KEY_COLUMN_NAME).notExist());
 
             this.table.putItem(putItemSpec);
             return value;
