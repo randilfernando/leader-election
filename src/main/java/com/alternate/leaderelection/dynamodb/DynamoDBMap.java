@@ -1,133 +1,250 @@
 package com.alternate.leaderelection.dynamodb;
 
+import com.alternate.leaderelection.common.JsonSerDe;
 import com.alternate.leaderelection.common.MapAdapter;
+import com.alternate.leaderelection.common.SerDe;
 import com.amazonaws.services.dynamodbv2.document.DynamoDB;
 import com.amazonaws.services.dynamodbv2.document.Expected;
 import com.amazonaws.services.dynamodbv2.document.Item;
 import com.amazonaws.services.dynamodbv2.document.Table;
 import com.amazonaws.services.dynamodbv2.document.spec.DeleteItemSpec;
-import com.amazonaws.services.dynamodbv2.document.spec.GetItemSpec;
 import com.amazonaws.services.dynamodbv2.document.spec.PutItemSpec;
+import com.amazonaws.services.dynamodbv2.model.AttributeDefinition;
 import com.amazonaws.services.dynamodbv2.model.ConditionalCheckFailedException;
-import com.fasterxml.jackson.core.JsonProcessingException;
+import com.amazonaws.services.dynamodbv2.model.CreateTableRequest;
+import com.amazonaws.services.dynamodbv2.model.KeySchemaElement;
+import com.amazonaws.services.dynamodbv2.model.KeyType;
+import com.amazonaws.services.dynamodbv2.model.ResourceInUseException;
+import com.amazonaws.services.dynamodbv2.model.ScalarAttributeType;
 
-import java.io.IOException;
+import static com.alternate.leaderelection.common.UnhandledException.unhandled;
 
-import static com.alternate.leaderelection.dynamodb.Config.KEY_COLUMN_NAME;
-import static com.alternate.leaderelection.dynamodb.Config.VALUE_COLUMN_NAME;
-
+/**
+ * @author randilfernando
+ */
 public class DynamoDBMap<K, V> extends MapAdapter<K, V> {
 
-    private Class<?> k;
-    private Class<?> v;
+    private final static SerDe<String> SER_DE = JsonSerDe.getInstance();
+
+    private final DynamoDB dynamoDB;
+    private final String tableName;
+
+    private final String keyColumn;
+    private final String valueColumn;
+
+    private final Class<K> keyClass;
+    private final Class<V> valueClass;
 
     private Table table;
 
-    public DynamoDBMap(Class<K> k, Class<V> v, String tableName) {
-        this(k, v, tableName, null);
+    private DynamoDBMap(DynamoDBMapBuilder<K, V> builder) {
+        this.dynamoDB = builder.dynamoDB;
+        this.tableName = builder.tableName;
+
+        this.keyColumn = builder.keyColumn;
+        this.valueColumn = builder.valueColumn;
+
+        this.keyClass = builder.keyClass;
+        this.valueClass = builder.valueClass;
+
+        this.table = this.createTable();
     }
 
-    public DynamoDBMap(Class<K> k, Class<V> v, String tableName, DynamoDB db) {
-        this.k = k;
-        this.v = v;
-        db = (db != null) ? db : DynamoDBHelper.createLocalDB();
-        this.table = DynamoDBHelper.createTable(db, tableName);
+    public static <K, V> DynamoDBMapBuilder<K, V> builder() {
+        return new DynamoDBMapBuilder<>();
+    }
+
+    @Override
+    public boolean containsKey(Object key) {
+        Item item = this.getItem(key);
+        return item != null;
     }
 
     @Override
     public V get(Object key) {
-        GetItemSpec getItemSpec = new GetItemSpec()
-                .withPrimaryKey(KEY_COLUMN_NAME, String.valueOf(key));
+        Item item = this.getItem(key);
 
-        Item item = this.table.getItem(getItemSpec);
+        if (item == null || !item.hasAttribute(this.valueColumn)) return null;
 
-        if (item == null || !item.hasAttribute(VALUE_COLUMN_NAME)) return null;
-
-        try {
-            String valueAsString = item.getString(VALUE_COLUMN_NAME);
-            return (V) SerDeHelper.getValue(valueAsString, this.v);
-        } catch (IOException | ClassCastException e) {
-            System.out.println("Serialization failed");
-            return null;
-        }
+        String valueAsString = item.getString(this.valueColumn);
+        return unhandled(() -> SER_DE.deserialize(valueAsString, this.valueClass));
     }
 
     @Override
     public V put(K key, V value) {
-        try {
-            String valueAsString = SerDeHelper.getValueAsString(value);
-            Item item = new Item()
-                    .withPrimaryKey(KEY_COLUMN_NAME, String.valueOf(key))
-                    .withString(VALUE_COLUMN_NAME, valueAsString);
-
-            PutItemSpec putItemSpec = new PutItemSpec()
-                    .withItem(item);
-
-            this.table.putItem(putItemSpec);
-            return value;
-        } catch (JsonProcessingException e) {
-            System.out.println("Serialization failed");
-            return null;
-        }
+        Item item = unhandled(() -> this.createItem(key, value));
+        this.table.putItem(item);
+        return value;
     }
 
     @Override
     public V remove(Object key) {
         V v = this.get(key);
 
-        DeleteItemSpec deleteItemSpec = new DeleteItemSpec()
-                .withPrimaryKey(KEY_COLUMN_NAME, String.valueOf(key));
+        String keyAsString = String.valueOf(key);
+        this.table.deleteItem(this.keyColumn, keyAsString);
 
-        this.table.deleteItem(deleteItemSpec);
         return v;
     }
 
     @Override
     public V putIfAbsent(K key, V value) {
         try {
-            String valueAsString = SerDeHelper.getValueAsString(value);
-
-            Item item = new Item()
-                    .withPrimaryKey(KEY_COLUMN_NAME, String.valueOf(key))
-                    .withString(VALUE_COLUMN_NAME, valueAsString);
+            Item item = unhandled(() -> this.createItem(key, value));
 
             PutItemSpec putItemSpec = new PutItemSpec()
                     .withItem(item)
-                    .withConditionExpression("attribute_not_exists(" + KEY_COLUMN_NAME + ")");
+                    .withExpected(new Expected(this.keyColumn).notExist());
 
             this.table.putItem(putItemSpec);
             return value;
-        } catch (JsonProcessingException e) {
-            System.out.println("Serialization failed");
-            return null;
         } catch (ConditionalCheckFailedException e) {
-            System.out.println("Conditional check failed: Value already exist");
             return get(key);
+        }
+    }
+
+    @Override
+    public V replace(K key, V value) {
+        try {
+            Item item = unhandled(() -> this.createItem(key, value));
+
+            PutItemSpec putItemSpec = new PutItemSpec()
+                    .withItem(item)
+                    .withExpected(new Expected(this.keyColumn).exists());
+
+            this.table.putItem(putItemSpec);
+            return value;
+        } catch (ConditionalCheckFailedException e) {
+            return null;
         }
     }
 
     @Override
     public boolean replace(K key, V oldValue, V newValue) {
         try {
-            String oldValueAsString = SerDeHelper.getValueAsString(oldValue);
-            String newValueAsString = SerDeHelper.getValueAsString(newValue);
-
-            Item item = new Item()
-                    .withPrimaryKey(KEY_COLUMN_NAME, String.valueOf(key))
-                    .withString(VALUE_COLUMN_NAME, newValueAsString);
+            String oldValueAsString = unhandled(() -> SER_DE.serialize(oldValue));
+            Item item = unhandled(() -> this.createItem(key, newValue));
 
             PutItemSpec putItemSpec = new PutItemSpec()
                     .withItem(item)
-                    .withExpected(new Expected(VALUE_COLUMN_NAME).eq(oldValueAsString));
+                    .withExpected(new Expected(this.valueColumn).eq(oldValueAsString));
 
             this.table.putItem(putItemSpec);
             return true;
-        } catch (JsonProcessingException e) {
-            System.out.println("Serialization failed");
-            return false;
         } catch (ConditionalCheckFailedException e) {
-            System.out.println("Conditional check failed: Value already updated");
             return false;
+        }
+    }
+
+    @Override
+    public V getOrDefault(Object key, V defaultValue) {
+        V v = this.get(key);
+        return (v != null) ? v : defaultValue;
+    }
+
+    @Override
+    public boolean remove(Object key, Object value) {
+        String keyAsString = String.valueOf(key);
+
+        try {
+            String valueAsString = unhandled(() -> SER_DE.serialize(value));
+
+            DeleteItemSpec deleteItemSpec = new DeleteItemSpec()
+                    .withPrimaryKey(this.keyColumn, keyAsString)
+                    .withExpected(new Expected(this.valueColumn).eq(valueAsString));
+
+            this.table.deleteItem(deleteItemSpec);
+            return true;
+        } catch (ConditionalCheckFailedException e) {
+            return false;
+        }
+    }
+
+    @Override
+    public void clear() {
+        this.table.delete();
+        this.table = this.createTable();
+    }
+
+    @Override
+    public String toString() {
+        return "DynamoDB Map with key class: " + this.keyClass.getSimpleName() + " and values class: " + this.valueClass.getSimpleName();
+    }
+
+    private Item getItem(Object key) {
+        String keyAsString = String.valueOf(key);
+
+        return this.table.getItem(this.keyColumn, keyAsString);
+    }
+
+    private Item createItem(K key, V value) throws Exception {
+        String keyAsString = String.valueOf(key);
+        String valueAsString = SER_DE.serialize(value);
+
+        return new Item()
+                .withPrimaryKey(this.keyColumn, keyAsString)
+                .withString(this.valueColumn, valueAsString);
+    }
+
+    private Table createTable() {
+        CreateTableRequest createTableRequest = new CreateTableRequest()
+                .withTableName(tableName)
+                .withKeySchema(new KeySchemaElement()
+                        .withAttributeName(this.keyColumn)
+                        .withKeyType(KeyType.HASH))
+                .withAttributeDefinitions(new AttributeDefinition()
+                        .withAttributeName(this.keyColumn)
+                        .withAttributeType(ScalarAttributeType.S));
+
+        try {
+            System.out.println("Create new table: " + tableName);
+            return dynamoDB.createTable(createTableRequest);
+        } catch (ResourceInUseException e) {
+            System.out.println("Table exist get existing table");
+            return dynamoDB.getTable(tableName);
+        }
+    }
+
+    public final static class DynamoDBMapBuilder<K, V> {
+        private String keyColumn = "keyColumn1";
+        private String valueColumn = "valueColumn1";
+        private Class<K> keyClass = null;
+        private Class<V> valueClass = null;
+        private DynamoDB dynamoDB = null;
+        private String tableName = null;
+
+        public DynamoDBMapBuilder<K, V> withKeyColumn(String keyColumn) {
+            this.keyColumn = keyColumn;
+            return this;
+        }
+
+        public DynamoDBMapBuilder<K, V> withValueColumn(String valueColumn) {
+            this.valueColumn = valueColumn;
+            return this;
+        }
+
+        public DynamoDBMapBuilder<K, V> withKeyClass(Class<K> keyClass) {
+            this.keyClass = keyClass;
+            return this;
+        }
+
+        public DynamoDBMapBuilder<K, V> withValueClass(Class<V> valueClass) {
+            this.valueClass = valueClass;
+            return this;
+        }
+
+        public DynamoDBMapBuilder<K, V> withDynamoDB(DynamoDB dynamoDB) {
+            this.dynamoDB = dynamoDB;
+            return this;
+        }
+
+        public DynamoDBMapBuilder<K, V> withTableName(String tableName) {
+            this.tableName = tableName;
+            return this;
+        }
+
+        public DynamoDBMap<K, V> build() {
+            return new DynamoDBMap<>(this);
         }
     }
 }

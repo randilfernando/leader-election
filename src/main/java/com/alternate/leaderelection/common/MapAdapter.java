@@ -3,9 +3,12 @@ package com.alternate.leaderelection.common;
 import java.util.Collection;
 import java.util.Map;
 import java.util.Set;
-import java.util.function.Function;
 
+/**
+ * @author randilfernando
+ */
 public abstract class MapAdapter<K, V> implements Map<K, V> {
+
     @Override
     public int size() {
         throw new UnsupportedOperationException("method not supported");
@@ -28,17 +31,17 @@ public abstract class MapAdapter<K, V> implements Map<K, V> {
 
     @Override
     public V get(Object key) {
-        return null;
+        throw new UnsupportedOperationException("method not supported");
     }
 
     @Override
     public V put(K key, V value) {
-        return null;
+        throw new UnsupportedOperationException("method not supported");
     }
 
     @Override
     public V remove(Object key) {
-        return null;
+        throw new UnsupportedOperationException("method not supported");
     }
 
     @Override
